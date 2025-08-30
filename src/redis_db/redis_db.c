@@ -136,7 +136,7 @@ const char *redis_type_to_string(redis_type_t type) {
         case REDIS_STRING: return "string";
         case REDIS_LIST: return "list";
         case REDIS_STREAM: return "stream";
-        case REDIS_ZSET: return "zset";
+        case REDIS_SORTED_SET: return "zset";
         case REDIS_CHANNEL: return "channel";
         default: return "unknown";
     }

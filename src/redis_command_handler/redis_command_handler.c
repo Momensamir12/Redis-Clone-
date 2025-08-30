@@ -54,7 +54,7 @@ static redis_command_t commands[] = {
     {"multi", handle_multi_command, 1, 1},
     {"exec", handle_exec_command, 1, 1},
     {"discard", handle_discard_command, 1, 1},
-    {"info", handle_info_command, 2, -1},
+    {"info", handle_info_command, 1, -1},
     {"replconf", handle_replconf_command, 2, -1},
     {"psync", handle_psync_command, 3, -1},
     {"wait", handle_wait_command, 3, 3},
@@ -69,6 +69,8 @@ static redis_command_t commands[] = {
     {"zcard", handle_zcard_command, 2, 2},
     {"zscore", handle_zscore_command, 3, 3},
     {"zrank", handle_zrank_command, 3, 3},
+    {"exists", handle_exists_command, 2, -1},
+
 
     {NULL, NULL, 0, 0}};
 
@@ -231,7 +233,7 @@ char *handle_command(redis_server_t *server, char *buffer, void *client)
         {
             char response[256];
             snprintf(response, sizeof(response),
-                     "-ERR Can't execute '%s': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n",
+                     "-ERR Can't execute '%s': only (P|S)UBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n",
                      args[0]);
 
             free_command_args(args, argc);
@@ -866,6 +868,7 @@ char *handle_type_command(redis_server_t *server, char **args, int argc, void *c
     }
     redis_object_t *obj = (redis_object_t *)value;
     char *response = encode_simple_string(redis_type_to_string(obj->type));
+    printf("%s\n", response);
 
     return response;
 }
@@ -1451,43 +1454,126 @@ char *handle_discard_command(redis_server_t *server, char **args, int argc, void
     return strdup("+OK\r\n");
 }
 
+static void human_readable_bytes(long long bytes, char *out, size_t out_len)
+{
+    if (bytes <= 0 || out == NULL) {
+        snprintf(out, out_len, "unknown");
+        return;
+    }
+
+    const char *units[] = {"B", "K", "M", "G", "T", "P"};
+    double val = (double)bytes;
+    int unit = 0;
+    while (val >= 1024.0 && unit < (int)(sizeof(units)/sizeof(units[0])) - 1) {
+        val /= 1024.0;
+        unit++;
+    }
+
+    if (unit == 0) {
+        snprintf(out, out_len, "%lld%s", (long long)bytes, units[unit]);
+    } else {
+        snprintf(out, out_len, "%.2f%s", val, units[unit]);
+    }
+}
+static long long get_used_memory_bytes(void)
+{
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f)
+        return -1;
+
+    char line[256];
+    long long kb = -1;
+    while (fgets(line, sizeof(line), f))
+    {
+        if (strncmp(line, "VmRSS:", 6) == 0)
+        {
+            /* line format: "VmRSS:\t   12345 kB\n" */
+            char *p = line + 6;
+            while (*p && !isdigit((unsigned char)*p))
+                p++;
+            if (*p)
+                kb = atoll(p);
+            break;
+        }
+    }
+    fclose(f);
+    if (kb <= 0)
+        return -1;
+    return kb * 1024LL;
+}
+
 char *handle_info_command(redis_server_t *server, char **args, int argc, void *client)
 {
     (void)client;
     (void)args;
     (void)argc;
 
-    if (!server->replication_info)
+    long long used_bytes = get_used_memory_bytes();
+    char used_human[64];
+    human_readable_bytes(used_bytes, used_human, sizeof(used_human));
+
+    const char *role_str = "unknown";
+    int connected_slaves = 0;
+    const char *master_host = "unknown";
+    int master_port = 0;
+    const char *replid = "unknown";
+    long long repl_offset = -1;
+
+    if (server->replication_info)
     {
-        return strdup("-ERR server not configured\r\n");
+        if (server->replication_info->role == MASTER)
+            role_str = "master";
+        else if (server->replication_info->role == SLAVE)
+            role_str = "slave";
+
+        connected_slaves = server->replication_info->connected_slaves;
+        master_host = server->replication_info->master_host ? server->replication_info->master_host : "unknown";
+        master_port = server->replication_info->master_port;
+        replid = server->replication_info->replication_id ? server->replication_info->replication_id : "unknown";
+        repl_offset = server->replication_info->master_repl_offset;
     }
 
-    char info_buffer[256];
-    int offset = 0;
-    if (server->replication_info->role == MASTER)
-    {
-        offset += snprintf(info_buffer + offset, sizeof(info_buffer) - offset,
-                           "role:master\r\nconnected_slaves:%d",
-                           server->replication_info->connected_slaves);
-    }
-    else if (server->replication_info->role == SLAVE)
-    {
-        offset += snprintf(info_buffer + offset, sizeof(info_buffer) - offset,
-                           "role:slave\r\nmaster_host:%s\r\nmaster_port:%d",
-                           server->replication_info->master_host ? server->replication_info->master_host : "unknown",
-                           server->replication_info->master_port);
-    }
-    else
-    {
-        return strdup("-ERR unknown role\r\n");
-    }
-    if (server->replication_info->replication_id && server->replication_info->master_repl_offset >= 0)
-    {
-        offset += snprintf(info_buffer + offset, sizeof(info_buffer) - offset, "\r\nmaster_replid:%s\r\nmaster_repl_offset:%d", server->replication_info->replication_id,
-                           server->replication_info->master_repl_offset);
-    }
+    /* Build array of lines */
+    char **lines = NULL;
+    int count = 0;
+    int cap = 0;
+    #define PUSH_LINE(fmt, ...)                                  \
+        do {                                                     \
+            int _len = snprintf(NULL, 0, fmt, ##__VA_ARGS__);    \
+            char *_s = malloc(_len + 1);                         \
+            if (_s) {                                           \
+                snprintf(_s, _len + 1, fmt, ##__VA_ARGS__);     \
+                if (count + 1 > cap) {                          \
+                    int _newcap = cap == 0 ? 8 : cap * 2;       \
+                    char **_tmp = realloc(lines, _newcap * sizeof(char *)); \
+                    if (!_tmp) { free(_s); break; }             \
+                    lines = _tmp; cap = _newcap;                \
+                }                                              \
+                lines[count++] = _s;                           \
+            }                                                  \
+        } while (0)
 
-    return encode_bulk_string(info_buffer);
+    PUSH_LINE("# Server");
+    PUSH_LINE("role:%s", role_str);
+    PUSH_LINE("used_memory:%lld", (long long)(used_bytes >= 0 ? used_bytes : 0LL));
+    PUSH_LINE("used_memory_human:%s", used_human);
+
+    PUSH_LINE("# Replication");
+    PUSH_LINE("connected_slaves:%d", connected_slaves);
+    PUSH_LINE("master_host:%s", master_host);
+    PUSH_LINE("master_port:%d", master_port);
+    PUSH_LINE("master_replid:%s", replid);
+    PUSH_LINE("master_repl_offset:%lld", (long long)(repl_offset >= 0 ? repl_offset : 0LL));
+
+    /* Encode as RESP array */
+    char *result = encode_resp_array(lines, count);
+
+    /* Cleanup */
+    for (int i = 0; i < count; i++) free(lines[i]);
+    free(lines);
+
+    #undef PUSH_LINE
+    return result;
 }
 
 char *handle_replconf_command(redis_server_t *server, char **args, int argc, void *client)
@@ -2267,6 +2353,8 @@ char *handle_zrange_command(redis_server_t *server, char **args, int argc, void 
         return strdup("*0\r\n");
     }
 
+
+
     if (obj->type != REDIS_SORTED_SET)
     {
         return strdup("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
@@ -2501,4 +2589,37 @@ char *handle_zrank_command(redis_server_t *server, char **args, int argc, void *
     char response[32];
     sprintf(response, ":%lld\r\n", rank);
     return strdup(response);
+}
+
+char *handle_exists_command(redis_server_t *server, char **args, int argc, void *client)
+{
+    (void)client;
+
+    if (argc < 2)
+    {
+        return strdup("-ERR wrong number of arguments for 'exists' command\r\n");
+    }
+
+    int exist_count = 0;
+    for (int i = 1; i < argc; i++)
+    {
+        char *key = args[i];
+        redis_object_t *obj = (redis_object_t *)hash_table_get(server->db->dict, key);
+        if (!obj)
+            continue;
+
+        if (is_expired(obj))
+        {
+            /* remove expired key */
+            redis_object_destroy(obj);
+            hash_table_delete(server->db->dict, key);
+            continue;
+        }
+
+        exist_count++;
+    }
+
+    char resp[32];
+    snprintf(resp, sizeof(resp), ":%d\r\n", exist_count);
+    return strdup(resp);
 }
