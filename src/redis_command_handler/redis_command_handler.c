@@ -2616,7 +2616,6 @@ char *handle_exists_command(redis_server_t *server, char **args, int argc, void 
 
         if (is_expired(obj))
         {
-            /* remove expired key */
             redis_object_destroy(obj);
             hash_table_delete(server->db->dict, key);
             continue;
@@ -2678,17 +2677,14 @@ char *handle_geoadd_command(redis_server_t *server, char **args, int argc, void 
             return strdup("-ERR value is not a valid float\r\n");
         }
 
-        /* Validate coordinates */
         if (!geohash_validate_coordinates(longitude, latitude))
         {
             return strdup("-ERR invalid longitude,latitude pair\r\n");
         }
 
-        /* Encode coordinates as geohash score */
         uint64_t geohash = geohash_encode(longitude, latitude);
         double score = (double)geohash;
 
-        /* Add to sorted set */
         int result = sorted_set_add(zset, member, score);
         if (result == 1)
         {
@@ -2719,14 +2715,13 @@ char *handle_geopos_command(redis_server_t *server, char **args, int argc, void 
 
     if (!obj)
     {
-        /* Return array of nulls for non-existent key */
         int member_count = argc - 2;
         size_t response_size = 64 + member_count * 16;
         char *response = malloc(response_size);
         int pos = sprintf(response, "*%d\r\n", member_count);
         for (int i = 0; i < member_count; i++)
         {
-            pos += sprintf(response + pos, "$-1\r\n");
+            pos += sprintf(response + pos, "*-1\r\n");  // Changed from $-1 to *-1
         }
         return response;
     }
@@ -2738,7 +2733,6 @@ char *handle_geopos_command(redis_server_t *server, char **args, int argc, void 
 
     redis_sorted_set_t *zset = (redis_sorted_set_t *)obj->ptr;
     
-    /* Build response */
     int member_count = argc - 2;
     size_t response_size = 1024;
     char *response = malloc(response_size);
@@ -2756,17 +2750,14 @@ char *handle_geopos_command(redis_server_t *server, char **args, int argc, void 
 
         if (sorted_set_score(zset, member, &score) == 0)
         {
-            /* Member not found */
-            pos += sprintf(response + pos, "$-1\r\n");
+            pos += sprintf(response + pos, "*-1\r\n");  
         }
         else
         {
-            /* Decode geohash back to coordinates */
             uint64_t geohash = (uint64_t)score;
             double longitude, latitude;
             geohash_decode(geohash, &longitude, &latitude);
 
-            /* Format longitude and latitude strings */
             char lon_str[64], lat_str[64];
             sprintf(lon_str, "%.17g", longitude);
             sprintf(lat_str, "%.17g", latitude);
@@ -2776,7 +2767,6 @@ char *handle_geopos_command(redis_server_t *server, char **args, int argc, void 
             pos += sprintf(response + pos, "$%zu\r\n%s\r\n", strlen(lat_str), lat_str);
         }
 
-        /* Expand buffer if needed */
         if (pos > (int)response_size - 256)
         {
             response_size *= 2;
