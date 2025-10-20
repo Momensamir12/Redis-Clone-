@@ -66,36 +66,39 @@ static inline uint64_t deinterleave64(uint64_t interleaved) {
 }
 
 uint64_t geohash_encode(double longitude, double latitude) {
-    /* Normalize coordinates to [0, 1] range */
     double lat_offset = (latitude - GEO_LAT_MIN) / (GEO_LAT_MAX - GEO_LAT_MIN);
     double lon_offset = (longitude - GEO_LONG_MIN) / (GEO_LONG_MAX - GEO_LONG_MIN);
 
-    /* Scale to 26-bit integers */
     lat_offset *= (1ULL << GEO_STEP_MAX);
     lon_offset *= (1ULL << GEO_STEP_MAX);
 
     uint32_t lat_int = (uint32_t)lat_offset;
     uint32_t lon_int = (uint32_t)lon_offset;
 
-    /* Redis interleaves as: interleave64(lat, lon) 
-     * Result is [LAT][LONG] where LAT bits are in even positions */
     return interleave64(lat_int, lon_int);
 }
 
 void geohash_decode(uint64_t hash, double *longitude, double *latitude) {
     uint64_t hash_sep = deinterleave64(hash);
     
-    /* After deinterleave: lower 32 bits are lat, upper 32 bits are lon */
     uint32_t lat_int = (uint32_t)(hash_sep & 0xFFFFFFFF);
     uint32_t lon_int = (uint32_t)((hash_sep >> 32) & 0xFFFFFFFF);
 
-    /* Convert back to [0, 1] range */
-    double lat_offset = (double)lat_int / (1ULL << GEO_STEP_MAX);
-    double lon_offset = (double)lon_int / (1ULL << GEO_STEP_MAX);
-
-    /* Scale back to geographic coordinates */
-    *latitude = lat_offset * (GEO_LAT_MAX - GEO_LAT_MIN) + GEO_LAT_MIN;
-    *longitude = lon_offset * (GEO_LONG_MAX - GEO_LONG_MIN) + GEO_LONG_MIN;
+    /* Calculate the range for this grid cell */
+    double lat_scale = GEO_LAT_MAX - GEO_LAT_MIN;
+    double lon_scale = GEO_LONG_MAX - GEO_LONG_MIN;
+    
+    /* Get the minimum corner of the grid cell */
+    double lat_min = GEO_LAT_MIN + (lat_int * 1.0 / (1ULL << GEO_STEP_MAX)) * lat_scale;
+    double lon_min = GEO_LONG_MIN + (lon_int * 1.0 / (1ULL << GEO_STEP_MAX)) * lon_scale;
+    
+    /* Get the maximum corner of the grid cell */
+    double lat_max = GEO_LAT_MIN + ((lat_int + 1) * 1.0 / (1ULL << GEO_STEP_MAX)) * lat_scale;
+    double lon_max = GEO_LONG_MIN + ((lon_int + 1) * 1.0 / (1ULL << GEO_STEP_MAX)) * lon_scale;
+    
+    /* Return the center of the grid cell */
+    *latitude = (lat_min + lat_max) / 2.0;
+    *longitude = (lon_min + lon_max) / 2.0;
 }
 
 int geohash_validate_coordinates(double longitude, double latitude) {
@@ -110,24 +113,9 @@ int geohash_validate_coordinates(double longitude, double latitude) {
 
 double geohash_encode_to_score(double longitude, double latitude) {
     uint64_t geohash = geohash_encode(longitude, latitude);
-    
-    /* Use union to reinterpret bits without numeric conversion */
-    union {
-        uint64_t u64;
-        double d;
-    } converter;
-    
-    converter.u64 = geohash;
-    return converter.d;
+    return (double)geohash;
 }
 
 uint64_t geohash_decode_from_score(double score) {
-    /* Use union to reinterpret bits without numeric conversion */
-    union {
-        uint64_t u64;
-        double d;
-    } converter;
-    
-    converter.d = score;
-    return converter.u64;
+    return (uint64_t)score;
 }

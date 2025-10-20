@@ -2682,8 +2682,8 @@ char *handle_geoadd_command(redis_server_t *server, char **args, int argc, void 
             return strdup("-ERR invalid longitude,latitude pair\r\n");
         }
 
-        uint64_t geohash = geohash_encode(longitude, latitude);
-        double score = (double)geohash;
+        /* Use union-based encoding to preserve all bits */
+        double score = geohash_encode_to_score(longitude, latitude);
 
         int result = sorted_set_add(zset, member, score);
         if (result == 1)
@@ -2721,7 +2721,7 @@ char *handle_geopos_command(redis_server_t *server, char **args, int argc, void 
         int pos = sprintf(response, "*%d\r\n", member_count);
         for (int i = 0; i < member_count; i++)
         {
-            pos += sprintf(response + pos, "*-1\r\n");  // Changed from $-1 to *-1
+            pos += sprintf(response + pos, "*-1\r\n");
         }
         return response;
     }
@@ -2750,11 +2750,12 @@ char *handle_geopos_command(redis_server_t *server, char **args, int argc, void 
 
         if (sorted_set_score(zset, member, &score) == 0)
         {
-            pos += sprintf(response + pos, "*-1\r\n");  
+            pos += sprintf(response + pos, "*-1\r\n");
         }
         else
         {
-            uint64_t geohash = (uint64_t)score;
+            /* Use union-based decoding to extract geohash */
+            uint64_t geohash = geohash_decode_from_score(score);
             double longitude, latitude;
             geohash_decode(geohash, &longitude, &latitude);
 
