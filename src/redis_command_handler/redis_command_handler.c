@@ -1534,46 +1534,47 @@ char *handle_info_command(redis_server_t *server, char **args, int argc, void *c
         repl_offset = server->replication_info->master_repl_offset;
     }
 
-    /* Build array of lines */
-    char **lines = NULL;
-    int count = 0;
-    int cap = 0;
-    #define PUSH_LINE(fmt, ...)                                  \
-        do {                                                     \
-            int _len = snprintf(NULL, 0, fmt, ##__VA_ARGS__);    \
-            char *_s = malloc(_len + 1);                         \
-            if (_s) {                                           \
-                snprintf(_s, _len + 1, fmt, ##__VA_ARGS__);     \
-                if (count + 1 > cap) {                          \
-                    int _newcap = cap == 0 ? 8 : cap * 2;       \
-                    char **_tmp = realloc(lines, _newcap * sizeof(char *)); \
-                    if (!_tmp) { free(_s); break; }             \
-                    lines = _tmp; cap = _newcap;                \
-                }                                              \
-                lines[count++] = _s;                           \
-            }                                                  \
-        } while (0)
+    /* Build single bulk string with newlines */
+    size_t buf_size = 1024;
+    char *info_buffer = malloc(buf_size);
+    if (!info_buffer)
+        return strdup(RESP_MEMORY_ERROR);
 
-    PUSH_LINE("# Server");
-    PUSH_LINE("role:%s", role_str);
-    PUSH_LINE("used_memory:%lld", (long long)(used_bytes >= 0 ? used_bytes : 0LL));
-    PUSH_LINE("used_memory_human:%s", used_human);
+    int pos = 0;
 
-    PUSH_LINE("# Replication");
-    PUSH_LINE("connected_slaves:%d", connected_slaves);
-    PUSH_LINE("master_host:%s", master_host);
-    PUSH_LINE("master_port:%d", master_port);
-    PUSH_LINE("master_replid:%s", replid);
-    PUSH_LINE("master_repl_offset:%lld", (long long)(repl_offset >= 0 ? repl_offset : 0LL));
+    pos += snprintf(info_buffer + pos, buf_size - pos,
+                    "# Server\r\n"
+                    "role:%s\r\n"
+                    "used_memory:%lld\r\n"
+                    "used_memory_human:%s\r\n",
+                    role_str,
+                    (long long)(used_bytes >= 0 ? used_bytes : 0LL),
+                    used_human);
 
-    /* Encode as RESP array */
-    char *result = encode_resp_array(lines, count);
+    pos += snprintf(info_buffer + pos, buf_size - pos,
+                    "# Replication\r\n"
+                    "connected_slaves:%d\r\n"
+                    "master_host:%s\r\n"
+                    "master_port:%d\r\n"
+                    "master_replid:%s\r\n"
+                    "master_repl_offset:%lld\r\n",
+                    connected_slaves,
+                    master_host,
+                    master_port,
+                    replid,
+                    (long long)(repl_offset >= 0 ? repl_offset : 0LL));
 
-    /* Cleanup */
-    for (int i = 0; i < count; i++) free(lines[i]);
-    free(lines);
+    /* Resize if needed */
+    if (pos + 64 > (int)buf_size)
+    {
+        buf_size = pos + 256;
+        char *tmp = realloc(info_buffer, buf_size);
+        if (tmp)
+            info_buffer = tmp;
+    }
 
-    #undef PUSH_LINE
+    char *result = encode_bulk_string(info_buffer);
+    free(info_buffer);
     return result;
 }
 
