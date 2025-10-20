@@ -71,6 +71,8 @@ static redis_command_t commands[] = {
     {"zscore", handle_zscore_command, 3, 3},
     {"zrank", handle_zrank_command, 3, 3},
     {"exists", handle_exists_command, 2, -1},
+    {"geoadd", handle_geoadd_command, 4, -1},
+    {"geopos", handle_geopos_command, 3, -1},
 
 
     {NULL, NULL, 0, 0}};
