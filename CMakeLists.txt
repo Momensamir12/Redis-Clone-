@@ -36,6 +36,7 @@ add_executable(redis
     src/rdb/rdb.c
     src/channels/channel.c
     src/lib/sorted_set.c
+    src/lib/geohash.c
 )
 
 

@@ -1,4 +1,3 @@
-// redis_sorted_set.h
 #ifndef SORTED_SET_H
 #define SORTED_SET_H
 
@@ -16,7 +15,7 @@ typedef struct redis_sorted_set redis_sorted_set_t;
 struct skip_list_node {
     double score;
     char *member;
-    skip_list_node_t **forward;  // Array of forward pointers
+    skip_list_node_t **forward; 
     int level;
 };
 

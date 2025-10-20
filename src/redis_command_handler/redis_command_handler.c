@@ -21,6 +21,7 @@
 #include "../rdb/io_buffer.h"
 #include "../channels/channel.h"
 #include "../lib/sorted_set.h"
+#include "../lib/geohash.h"
 
 #define NULL_RESP_VALUE "$-1\r\n"
 #define PSYNC_RESPONSE_SIZE 1024
@@ -2622,4 +2623,167 @@ char *handle_exists_command(redis_server_t *server, char **args, int argc, void 
     char resp[32];
     snprintf(resp, sizeof(resp), ":%d\r\n", exist_count);
     return strdup(resp);
+}
+
+char *handle_geoadd_command(redis_server_t *server, char **args, int argc, void *client)
+{
+    (void)client;
+
+    if (argc < 4 || (argc - 2) % 3 != 0)
+    {
+        return strdup("-ERR wrong number of arguments for 'geoadd' command\r\n");
+    }
+
+    char *key = args[1];
+    redis_object_t *obj = (redis_object_t *)hash_table_get(server->db->dict, key);
+
+    if (!obj)
+    {
+        obj = redis_object_create_sorted_set();
+        if (!obj)
+        {
+            return strdup("-ERR out of memory\r\n");
+        }
+        hash_table_set(server->db->dict, key, obj);
+    }
+    else if (obj->type != REDIS_SORTED_SET)
+    {
+        return strdup("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    }
+
+    redis_sorted_set_t *zset = (redis_sorted_set_t *)obj->ptr;
+    int added_count = 0;
+
+    for (int i = 2; i < argc; i += 3)
+    {
+        char *lon_str = args[i];
+        char *lat_str = args[i + 1];
+        char *member = args[i + 2];
+
+        char *endptr;
+        double longitude = strtod(lon_str, &endptr);
+        if (*endptr != '\0')
+        {
+            return strdup("-ERR value is not a valid float\r\n");
+        }
+
+        double latitude = strtod(lat_str, &endptr);
+        if (*endptr != '\0')
+        {
+            return strdup("-ERR value is not a valid float\r\n");
+        }
+
+        /* Validate coordinates */
+        if (!geohash_validate_coordinates(longitude, latitude))
+        {
+            return strdup("-ERR invalid longitude,latitude pair\r\n");
+        }
+
+        /* Encode coordinates as geohash score */
+        uint64_t geohash = geohash_encode(longitude, latitude);
+        double score = (double)geohash;
+
+        /* Add to sorted set */
+        int result = sorted_set_add(zset, member, score);
+        if (result == 1)
+        {
+            added_count++;
+        }
+        else if (result == -1)
+        {
+            return strdup("-ERR out of memory\r\n");
+        }
+    }
+
+    char response[32];
+    sprintf(response, ":%d\r\n", added_count);
+    return strdup(response);
+}
+
+char *handle_geopos_command(redis_server_t *server, char **args, int argc, void *client)
+{
+    (void)client;
+
+    if (argc < 3)
+    {
+        return strdup("-ERR wrong number of arguments for 'geopos' command\r\n");
+    }
+
+    char *key = args[1];
+    redis_object_t *obj = (redis_object_t *)hash_table_get(server->db->dict, key);
+
+    if (!obj)
+    {
+        /* Return array of nulls for non-existent key */
+        int member_count = argc - 2;
+        size_t response_size = 64 + member_count * 16;
+        char *response = malloc(response_size);
+        int pos = sprintf(response, "*%d\r\n", member_count);
+        for (int i = 0; i < member_count; i++)
+        {
+            pos += sprintf(response + pos, "$-1\r\n");
+        }
+        return response;
+    }
+
+    if (obj->type != REDIS_SORTED_SET)
+    {
+        return strdup("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    }
+
+    redis_sorted_set_t *zset = (redis_sorted_set_t *)obj->ptr;
+    
+    /* Build response */
+    int member_count = argc - 2;
+    size_t response_size = 1024;
+    char *response = malloc(response_size);
+    if (!response)
+    {
+        return strdup("-ERR out of memory\r\n");
+    }
+
+    int pos = sprintf(response, "*%d\r\n", member_count);
+
+    for (int i = 2; i < argc; i++)
+    {
+        char *member = args[i];
+        double score;
+
+        if (sorted_set_score(zset, member, &score) == 0)
+        {
+            /* Member not found */
+            pos += sprintf(response + pos, "$-1\r\n");
+        }
+        else
+        {
+            /* Decode geohash back to coordinates */
+            uint64_t geohash = (uint64_t)score;
+            double longitude, latitude;
+            geohash_decode(geohash, &longitude, &latitude);
+
+            /* Format longitude and latitude strings */
+            char lon_str[64], lat_str[64];
+            sprintf(lon_str, "%.17g", longitude);
+            sprintf(lat_str, "%.17g", latitude);
+
+            pos += sprintf(response + pos, "*2\r\n");
+            pos += sprintf(response + pos, "$%zu\r\n%s\r\n", strlen(lon_str), lon_str);
+            pos += sprintf(response + pos, "$%zu\r\n%s\r\n", strlen(lat_str), lat_str);
+        }
+
+        /* Expand buffer if needed */
+        if (pos > (int)response_size - 256)
+        {
+            response_size *= 2;
+            char *tmp = realloc(response, response_size);
+            if (!tmp)
+            {
+                free(response);
+                return strdup("-ERR out of memory\r\n");
+            }
+            response = tmp;
+        }
+    }
+
+    return response;
 }
