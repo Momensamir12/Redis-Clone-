@@ -75,6 +75,7 @@ static redis_command_t commands[] = {
     {"geopos", handle_geopos_command, 3, -1},
 
 
+
     {NULL, NULL, 0, 0}};
 
 static const char *pubsub_allowed_commands[] = {
@@ -2543,6 +2544,7 @@ char *handle_zscore_command(redis_server_t *server, char **args, int argc, void 
         return strdup("$-1\r\n");
     }
 
+    /* Return score as-is for normal sorted sets */
     char score_str[32];
     if (score == (long long)score)
     {
