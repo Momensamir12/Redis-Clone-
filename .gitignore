@@ -52,4 +52,7 @@ Mkfile.old
 dkms.conf
 
 build
-vcpkg_installed
+vcpkg_installedredis.stdout
+*.stdout
+*.stderr
+*.log
