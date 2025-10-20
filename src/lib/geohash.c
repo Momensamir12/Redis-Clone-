@@ -1,12 +1,18 @@
 #include "geohash.h"
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #define GEO_STEP_MAX 26
 #define GEO_LAT_MIN -85.05112878
 #define GEO_LAT_MAX 85.05112878
 #define GEO_LONG_MIN -180
 #define GEO_LONG_MAX 180
+#define EARTH_RADIUS_IN_METERS 6372797.560856
 
 static inline uint64_t interleave64(uint32_t xlo, uint32_t ylo) {
     static const uint64_t B[] = {0x5555555555555555ULL, 0x3333333333333333ULL,
@@ -118,4 +124,28 @@ double geohash_encode_to_score(double longitude, double latitude) {
 
 uint64_t geohash_decode_from_score(double score) {
     return (uint64_t)score;
+}
+
+/* Convert degrees to radians */
+static inline double deg_to_rad(double deg) {
+    return deg * M_PI / 180.0;
+}
+
+/* Calculate distance between two points using Haversine formula */
+double geohash_distance(double lon1, double lat1, double lon2, double lat2) {
+    double lat1_rad = deg_to_rad(lat1);
+    double lat2_rad = deg_to_rad(lat2);
+    double lon1_rad = deg_to_rad(lon1);
+    double lon2_rad = deg_to_rad(lon2);
+    
+    double dlat = lat2_rad - lat1_rad;
+    double dlon = lon2_rad - lon1_rad;
+    
+    double a = sin(dlat / 2.0) * sin(dlat / 2.0) +
+               cos(lat1_rad) * cos(lat2_rad) *
+               sin(dlon / 2.0) * sin(dlon / 2.0);
+    
+    double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+    
+    return EARTH_RADIUS_IN_METERS * c;
 }

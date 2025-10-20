@@ -73,6 +73,10 @@ static redis_command_t commands[] = {
     {"exists", handle_exists_command, 2, -1},
     {"geoadd", handle_geoadd_command, 4, -1},
     {"geopos", handle_geopos_command, 3, -1},
+    {"geodist", handle_geodist_command, 4, -1},
+    {"geosearch", handle_geosearch_command, 7, -1},
+    {"geodist", handle_geodist_command, 4, 5},
+    {"geosearch", handle_geosearch_command, 7, -1},
 
 
 
@@ -2781,5 +2785,247 @@ char *handle_geopos_command(redis_server_t *server, char **args, int argc, void 
         }
     }
 
+    return response;
+}
+
+char *handle_geodist_command(redis_server_t *server, char **args, int argc, void *client)
+{
+    (void)client;
+
+    if (argc < 4)
+    {
+        return strdup("-ERR wrong number of arguments for 'geodist' command\r\n");
+    }
+
+    char *key = args[1];
+    char *member1 = args[2];
+    char *member2 = args[3];
+    
+    /* Optional unit parameter (default is meters) */
+    double unit_multiplier = 1.0;
+    if (argc >= 5)
+    {
+        char *unit = args[4];
+        if (strcasecmp(unit, "m") == 0)
+        {
+            unit_multiplier = 1.0;
+        }
+        else if (strcasecmp(unit, "km") == 0)
+        {
+            unit_multiplier = 0.001;
+        }
+        else if (strcasecmp(unit, "mi") == 0)
+        {
+            unit_multiplier = 0.000621371;
+        }
+        else if (strcasecmp(unit, "ft") == 0)
+        {
+            unit_multiplier = 3.28084;
+        }
+        else
+        {
+            return strdup("-ERR unsupported unit provided. please use m, km, ft, mi\r\n");
+        }
+    }
+
+    redis_object_t *obj = (redis_object_t *)hash_table_get(server->db->dict, key);
+
+    if (!obj)
+    {
+        return strdup("$-1\r\n");
+    }
+
+    if (obj->type != REDIS_SORTED_SET)
+    {
+        return strdup("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    }
+
+    redis_sorted_set_t *zset = (redis_sorted_set_t *)obj->ptr;
+    double score1, score2;
+
+    /* Get scores for both members */
+    if (sorted_set_score(zset, member1, &score1) == 0)
+    {
+        return strdup("$-1\r\n");
+    }
+
+    if (sorted_set_score(zset, member2, &score2) == 0)
+    {
+        return strdup("$-1\r\n");
+    }
+
+    /* Decode coordinates from geohash */
+    uint64_t geohash1 = geohash_decode_from_score(score1);
+    uint64_t geohash2 = geohash_decode_from_score(score2);
+    
+    double lon1, lat1, lon2, lat2;
+    geohash_decode(geohash1, &lon1, &lat1);
+    geohash_decode(geohash2, &lon2, &lat2);
+
+    /* Calculate distance using Haversine formula */
+    double distance = geohash_distance(lon1, lat1, lon2, lat2);
+    
+    /* Apply unit conversion */
+    distance *= unit_multiplier;
+
+    /* Format response */
+    char distance_str[64];
+    sprintf(distance_str, "%.4f", distance);
+    
+    return encode_bulk_string(distance_str);
+}
+
+char *handle_geosearch_command(redis_server_t *server, char **args, int argc, void *client)
+{
+    (void)client;
+
+    if (argc < 7)
+    {
+        return strdup("-ERR wrong number of arguments for 'geosearch' command\r\n");
+    }
+
+    char *key = args[1];
+    
+    /* Parse FROMLONLAT option */
+    if (strcasecmp(args[2], "FROMLONLAT") != 0)
+    {
+        return strdup("-ERR syntax error\r\n");
+    }
+
+    char *endptr;
+    double center_lon = strtod(args[3], &endptr);
+    if (*endptr != '\0')
+    {
+        return strdup("-ERR value is not a valid float\r\n");
+    }
+
+    double center_lat = strtod(args[4], &endptr);
+    if (*endptr != '\0')
+    {
+        return strdup("-ERR value is not a valid float\r\n");
+    }
+
+    /* Parse BYRADIUS option */
+    if (strcasecmp(args[5], "BYRADIUS") != 0)
+    {
+        return strdup("-ERR syntax error\r\n");
+    }
+
+    double radius = strtod(args[6], &endptr);
+    if (*endptr != '\0')
+    {
+        return strdup("-ERR value is not a valid float\r\n");
+    }
+
+    /* Parse unit (default is meters) */
+    double unit_multiplier = 1.0;
+    if (argc >= 8)
+    {
+        char *unit = args[7];
+        if (strcasecmp(unit, "m") == 0)
+        {
+            unit_multiplier = 1.0;
+        }
+        else if (strcasecmp(unit, "km") == 0)
+        {
+            unit_multiplier = 1000.0;
+        }
+        else if (strcasecmp(unit, "mi") == 0)
+        {
+            unit_multiplier = 1609.34;
+        }
+        else if (strcasecmp(unit, "ft") == 0)
+        {
+            unit_multiplier = 0.3048;
+        }
+        else
+        {
+            return strdup("-ERR unsupported unit provided. please use m, km, ft, mi\r\n");
+        }
+    }
+
+    /* Convert radius to meters */
+    double radius_meters = radius * unit_multiplier;
+
+    redis_object_t *obj = (redis_object_t *)hash_table_get(server->db->dict, key);
+
+    if (!obj)
+    {
+        return strdup("*0\r\n");
+    }
+
+    if (obj->type != REDIS_SORTED_SET)
+    {
+        return strdup("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n");
+    }
+
+    redis_sorted_set_t *zset = (redis_sorted_set_t *)obj->ptr;
+
+    /* Build result array */
+    size_t response_size = 1024;
+    char *response = malloc(response_size);
+    if (!response)
+    {
+        return strdup("-ERR out of memory\r\n");
+    }
+
+    /* Count matching members first */
+    int match_count = 0;
+    char **matching_members = malloc(sizeof(char *) * 100);
+    if (!matching_members)
+    {
+        free(response);
+        return strdup("-ERR out of memory\r\n");
+    }
+
+    /* Iterate through all members in the sorted set */
+    skip_list_node_t *node = zset->skiplist->header->forward[0];
+    while (node)
+    {
+        double score = node->score;
+        char *member = node->member;
+
+        /* Decode geohash */
+        uint64_t geohash = geohash_decode_from_score(score);
+        double lon, lat;
+        geohash_decode(geohash, &lon, &lat);
+
+        /* Calculate distance from center */
+        double distance = geohash_distance(center_lon, center_lat, lon, lat);
+
+        /* Check if within radius */
+        if (distance <= radius_meters)
+        {
+            matching_members[match_count] = member;
+            match_count++;
+        }
+
+        node = node->forward[0];
+    }
+
+    /* Build RESP array response */
+    int pos = sprintf(response, "*%d\r\n", match_count);
+
+    for (int i = 0; i < match_count; i++)
+    {
+        pos += sprintf(response + pos, "$%zu\r\n%s\r\n", 
+                      strlen(matching_members[i]), matching_members[i]);
+
+        /* Expand buffer if needed */
+        if (pos > (int)response_size - 256)
+        {
+            response_size *= 2;
+            char *tmp = realloc(response, response_size);
+            if (!tmp)
+            {
+                free(matching_members);
+                free(response);
+                return strdup("-ERR out of memory\r\n");
+            }
+            response = tmp;
+        }
+    }
+
+    free(matching_members);
     return response;
 }

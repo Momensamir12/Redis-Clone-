@@ -39,4 +39,7 @@ add_executable(redis
     src/lib/geohash.c
 )
 
+# Link the math library
+target_link_libraries(redis m)
+
 
